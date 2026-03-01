@@ -18,3 +18,17 @@ View your app in AI Studio: https://ai.studio/apps/02e6f65d-d38c-4cf4-879c-4c8c8
 2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
 3. Run the app:
    `npm run dev`
+
+## CLI (local export)
+
+For pixel-perfect exports (matching Chromium rendering), use the built-in CLI.
+
+1. Install dependencies:
+   `npm install`
+2. Install Chromium for Playwright (one-time):
+   `npx playwright install chromium`
+3. Export pages from a Markdown file:
+   `npm run cli -- export --in ./article.md --out ./output --zip`
+
+You can also `npm link` and then run:
+`md2rednote export --in ./article.md --out ./output`
