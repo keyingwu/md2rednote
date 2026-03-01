@@ -1,0 +1,5 @@
+{
+  "name": "RedNote Generator",
+  "description": "A smart tool that automatically formats articles into beautiful RedNote (XiaoHongShu) style cards without requiring HTML knowledge.",
+  "requestFramePermissions": []
+}
