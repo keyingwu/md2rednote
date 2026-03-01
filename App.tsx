@@ -7,6 +7,57 @@ import { DEFAULT_ARTICLE } from './constants';
 import html2canvas from 'html2canvas';
 import JSZip from 'jszip';
 
+const createExportPlaceholder = (message: string) => {
+  const safeMessage = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675">
+      <rect width="100%" height="100%" fill="#f8fafc"/>
+      <rect x="30" y="30" width="1140" height="615" rx="16" fill="#ffffff" stroke="#e2e8f0" stroke-width="2"/>
+      <text x="600" y="330" text-anchor="middle" fill="#64748b" font-size="34" font-family="system-ui, -apple-system, Segoe UI, Roboto">${safeMessage}</text>
+    </svg>`
+  )}`;
+};
+
+const isCrossOriginHttpImage = (src: string) => {
+  if (!src) return false;
+  if (src.startsWith('data:') || src.startsWith('blob:')) return false;
+
+  try {
+    const parsed = new URL(src, window.location.href);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
+    return parsed.origin !== window.location.origin;
+  } catch {
+    return false;
+  }
+};
+
+const waitNextFrame = () => new Promise<void>((resolve) => {
+  requestAnimationFrame(() => resolve());
+});
+
+const waitForImagesToSettle = async (root: HTMLElement, timeoutMs = 8000) => {
+  const images = Array.from(root.querySelectorAll('img'));
+  await Promise.all(images.map((image) => new Promise<void>((resolve) => {
+    if (image.complete) {
+      resolve();
+      return;
+    }
+
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      image.removeEventListener('load', done);
+      image.removeEventListener('error', done);
+      resolve();
+    };
+
+    image.addEventListener('load', done, { once: true });
+    image.addEventListener('error', done, { once: true });
+    setTimeout(done, timeoutMs);
+  })));
+};
+
 const App: React.FC = () => {
   // Use ArticleContent object instead of HTML string
   const [articleData, setArticleData] = useState<ArticleContent>(DEFAULT_ARTICLE);
@@ -17,26 +68,83 @@ const App: React.FC = () => {
 
   const handleExport = async () => {
     if (!cardRef.current) return;
+    const target = cardRef.current;
     
     setIsExporting(true);
     try {
-      // 1. Generate high-res canvas from the DOM element
-      const canvas = await html2canvas(cardRef.current, {
-        scale: 4, // 4x resolution for ultra-high quality
-        backgroundColor: null, // Transparent
+      const display = window.getComputedStyle(target).display;
+      if (display === 'none') {
+        throw new Error('Preview card is hidden. Please switch to preview before exporting.');
+      }
+
+      const sourceBounds = target.getBoundingClientRect();
+      const sourceWidth = Math.max(Math.round(sourceBounds.width), target.clientWidth, target.scrollWidth);
+      if (sourceWidth < 1) {
+        throw new Error('Preview card is not visible yet. Please try again after it is rendered.');
+      }
+
+      const sandbox = document.createElement('div');
+      sandbox.style.position = 'fixed';
+      sandbox.style.left = '-100000px';
+      sandbox.style.top = '0';
+      sandbox.style.pointerEvents = 'none';
+      sandbox.style.opacity = '0';
+      sandbox.style.background = '#ffffff';
+      sandbox.style.zIndex = '-1';
+
+      const clonedTarget = target.cloneNode(true) as HTMLDivElement;
+      clonedTarget.style.width = `${sourceWidth}px`;
+      clonedTarget.style.maxWidth = `${sourceWidth}px`;
+      clonedTarget.style.minHeight = 'auto';
+      clonedTarget.style.height = 'auto';
+      clonedTarget.style.transform = 'none';
+
+      const clonedImages = clonedTarget.querySelectorAll('img');
+      clonedImages.forEach((img) => {
+        if (isCrossOriginHttpImage(img.src)) {
+          img.src = createExportPlaceholder('External image skipped during export');
+        }
       });
 
-      // 2. Calculate slicing dimensions
-      // RedNote standard ratio is 3:4 (vertical)
-      // We keep the width fixed and slice the height
+      sandbox.appendChild(clonedTarget);
+      document.body.appendChild(sandbox);
+
+      let canvas: HTMLCanvasElement | null = null;
+      try {
+        await waitNextFrame();
+        await waitForImagesToSettle(clonedTarget);
+
+        const cloneBounds = clonedTarget.getBoundingClientRect();
+        const width = Math.max(Math.round(cloneBounds.width), clonedTarget.clientWidth, clonedTarget.scrollWidth);
+        const height = Math.max(Math.round(cloneBounds.height), clonedTarget.clientHeight, clonedTarget.scrollHeight);
+
+        if (width < 1 || height < 1) {
+          throw new Error('Export failed because preview content has zero size.');
+        }
+
+        canvas = await html2canvas(clonedTarget, {
+          scale: 3,
+          backgroundColor: '#ffffff',
+          useCORS: true,
+          imageTimeout: 15000,
+          width,
+          height,
+        });
+      } finally {
+        sandbox.remove();
+      }
+
+      if (!canvas || canvas.width < 1 || canvas.height < 1) {
+        throw new Error('Export failed because captured canvas has zero size. Keep preview visible and try again.');
+      }
+
       const sliceWidth = canvas.width;
-      const sliceHeight = Math.floor(sliceWidth * (4 / 3));
+      const sliceHeight = Math.max(1, Math.floor(sliceWidth * (4 / 3)));
       const totalHeight = canvas.height;
-      const numSlices = Math.ceil(totalHeight / sliceHeight);
+      const numSlices = Math.max(1, Math.ceil(totalHeight / sliceHeight));
 
       const zip = new JSZip();
 
-      // 3. Slice the canvas
       for (let i = 0; i < numSlices; i++) {
         const sliceCanvas = document.createElement('canvas');
         sliceCanvas.width = sliceWidth;
@@ -51,14 +159,14 @@ const App: React.FC = () => {
           const sourceY = i * sliceHeight;
           const remainingHeight = totalHeight - sourceY;
           const drawHeight = Math.min(sliceHeight, remainingHeight);
+          if (drawHeight <= 0) continue;
 
           ctx.drawImage(
             canvas,
-            0, sourceY, sliceWidth, drawHeight, // Source
-            0, 0, sliceWidth, drawHeight        // Destination
+            0, sourceY, sliceWidth, drawHeight,
+            0, 0, sliceWidth, drawHeight
           );
 
-          // Convert slice to blob and add to zip
           const blob = await new Promise<Blob | null>(resolve => sliceCanvas.toBlob(resolve, 'image/png'));
           if (blob) {
             zip.file(`rednote-page-${i + 1}.png`, blob);
@@ -66,13 +174,13 @@ const App: React.FC = () => {
         }
       }
 
-      // 4. Generate and download zip
       const content = await zip.generateAsync({ type: 'blob' });
       const link = document.createElement('a');
-      link.href = URL.createObjectURL(content);
+      const objectUrl = URL.createObjectURL(content);
+      link.href = objectUrl;
       link.download = `rednote-export-${Date.now()}.zip`;
       link.click();
-      URL.revokeObjectURL(link.href);
+      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
       
       setExportSuccess(true);
       setTimeout(() => setExportSuccess(false), 2000);

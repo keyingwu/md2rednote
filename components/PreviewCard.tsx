@@ -1,4 +1,4 @@
-import React, { forwardRef } from 'react';
+import React, { Children, cloneElement, forwardRef, isValidElement } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
@@ -21,11 +21,52 @@ const PreviewCard = forwardRef<HTMLDivElement, TemplateProps>(({ data }, ref) =>
           src={imageSrc} 
           alt={alt || 'Article Image'} 
           className="rounded-lg shadow-md my-4 w-full"
-          crossOrigin="anonymous"
           {...props} 
         />
       );
-    }
+    },
+    ol: ({ children, start, ...props }: any) => {
+      const parsedStart = Number(start);
+      let nextOrder = Number.isFinite(parsedStart) && parsedStart > 0 ? parsedStart : 1;
+
+      const orderedChildren = Children.map(children, (child) => {
+        if (!isValidElement(child)) return child;
+        const childTagName = (child.props as { node?: { tagName?: string } }).node?.tagName;
+        if (childTagName && childTagName !== 'li') return child;
+
+        const childClassName = (child.props as { className?: string }).className ?? '';
+        const mergedClassName = `${childClassName} ordered-list-item`.trim();
+
+        return cloneElement(child, {
+          className: mergedClassName,
+          'data-ordered-index': nextOrder++,
+        });
+      });
+
+      return (
+        <ol start={start} {...props}>
+          {orderedChildren}
+        </ol>
+      );
+    },
+    li: ({ children, className = '', ...props }: any) => {
+      const orderedIndex = props['data-ordered-index'];
+      if (typeof orderedIndex === 'number') {
+        delete props['data-ordered-index'];
+        return (
+          <li className={className} {...props}>
+            <span className="ordered-list-marker" aria-hidden="true">{orderedIndex}.</span>
+            <div className="ordered-list-content">{children}</div>
+          </li>
+        );
+      }
+
+      return (
+        <li className={className} {...props}>
+          {children}
+        </li>
+      );
+    },
   };
 
   return (
@@ -37,6 +78,7 @@ const PreviewCard = forwardRef<HTMLDivElement, TemplateProps>(({ data }, ref) =>
       */}
       <div 
         ref={ref}
+        data-export-root="true"
         className={`
           relative bg-white rounded-xl overflow-hidden flex-shrink-0
           w-full max-w-[600px] min-h-[800px]
@@ -163,9 +205,7 @@ const PreviewCard = forwardRef<HTMLDivElement, TemplateProps>(({ data }, ref) =>
 
             .typo-content ul, .typo-content ol {
               font-size: 18px;
-              padding-left: 20px;
               margin-bottom: 20px;
-              list-style-position: outside;
               color: #333;
             }
             @media (min-width: 650px) {
@@ -174,9 +214,43 @@ const PreviewCard = forwardRef<HTMLDivElement, TemplateProps>(({ data }, ref) =>
 
             .typo-content li {
               margin-bottom: 8px;
+              line-height: 1.65;
             }
-            .typo-content ul { list-style-type: disc; }
-            .typo-content ol { list-style-type: decimal; }
+
+            .typo-content ul {
+              list-style-type: disc;
+              list-style-position: outside;
+              padding-left: 1.2em;
+            }
+            .typo-content ul > li {
+              padding-left: 0.1em;
+            }
+
+            .typo-content ol {
+              list-style: none;
+              padding-left: 0;
+              margin-left: 0;
+            }
+            .typo-content ol > li.ordered-list-item {
+              display: grid;
+              grid-template-columns: max-content 1fr;
+              column-gap: 0.55em;
+              align-items: start;
+              margin-bottom: 18px;
+            }
+            .typo-content .ordered-list-marker {
+              color: #444;
+              font-variant-numeric: tabular-nums;
+              line-height: 1.65;
+              text-align: right;
+            }
+            .typo-content .ordered-list-content > p {
+              margin-bottom: 0;
+            }
+            .typo-content .ordered-list-content > ul {
+              margin-top: 14px;
+              margin-bottom: 0;
+            }
 
             .typo-content blockquote {
               border-left: 4px solid #4a9eff;
