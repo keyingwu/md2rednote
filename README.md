@@ -44,6 +44,50 @@ npm link
 md2rednote export --in ./article.md --out ./output
 ```
 
+## Example
+
+仓库里自带一个可直接跑的示例：
+
+- 源文件：[`example.md`](/Users/wukeying/Desktop/projects/90_personal/md2rednote/example.md)
+- 导出目录：[`example/`](/Users/wukeying/Desktop/projects/90_personal/md2rednote/example)
+
+实际生成示例所用命令：
+
+```bash
+npm run cli -- export --in ./example.md --out ./example --en-title "CLI Example" --metadata "2026-03-07 · md2rednote"
+```
+
+当前示例已经导出完成，目录中包含：
+
+- `example/rednote-page-01.png`
+- `example/rednote-page-02.png`
+- `example/rednote-page-03.png`
+- `example/rednote-page-04.png`
+- `example/rednote-page-05.png`
+- `example/example-export.zip`
+
+示例导出预览：
+
+### Page 1
+
+![Example page 1](./example/rednote-page-01.png)
+
+### Page 2
+
+![Example page 2](./example/rednote-page-02.png)
+
+### Page 3
+
+![Example page 3](./example/rednote-page-03.png)
+
+### Page 4
+
+![Example page 4](./example/rednote-page-04.png)
+
+### Page 5
+
+![Example page 5](./example/rednote-page-05.png)
+
 ## Usage
 
 ### 从 Markdown 导出
