@@ -1,4 +1,4 @@
-import React, { Children, cloneElement, forwardRef, isValidElement, memo, useMemo } from 'react';
+import React, { Children, forwardRef, isValidElement, memo, useMemo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import type { Components } from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
@@ -17,58 +17,44 @@ const PreviewCard = memo(forwardRef<HTMLDivElement, TemplateProps>(function Prev
 
   // Custom components for ReactMarkdown
   const components = useMemo<Components>(() => ({
-    img: ({ src, alt, ...props }) => {
+    img: ({ src, alt, title, width, height }) => {
       // Check if src is an image ID in our map
       const imageSrc = src && images[src] ? images[src] : src;
       return (
         <img 
           src={imageSrc} 
           alt={alt || 'Article Image'} 
+          title={title}
+          width={width}
+          height={height}
           className="rounded-lg shadow-md my-4 w-full"
-          {...props} 
         />
       );
     },
-    ol: ({ children, start, ...props }) => {
+    ol: ({ children, start }) => {
       const parsedStart = Number(start);
       let nextOrder = Number.isFinite(parsedStart) && parsedStart > 0 ? parsedStart : 1;
 
       const orderedChildren = Children.map(children, (child) => {
         if (!isValidElement(child)) return child;
-        const childTagName = (child.props as { node?: { tagName?: string } }).node?.tagName;
-        if (childTagName && childTagName !== 'li') return child;
+        if (child.type !== 'li') return child;
 
-        const childClassName = (child.props as { className?: string }).className ?? '';
-        const mergedClassName = `${childClassName} ordered-list-item`.trim();
+        const childProps = child.props as { children?: React.ReactNode; className?: string };
+        const order = nextOrder++;
+        const mergedClassName = `${childProps.className ?? ''} ordered-list-item`.trim();
 
-        return cloneElement(child, {
-          className: mergedClassName,
-          'data-ordered-index': nextOrder++,
-        });
+        return (
+          <li key={child.key ?? `li-${order}`} className={mergedClassName}>
+            <span className="ordered-list-marker" aria-hidden="true">{order}.</span>
+            <div className="ordered-list-content">{childProps.children}</div>
+          </li>
+        );
       });
 
       return (
-        <ol start={start} {...props}>
+        <ol start={start}>
           {orderedChildren}
         </ol>
-      );
-    },
-    li: ({ children, className = '', ...props }) => {
-      const orderedIndex = (props as { ['data-ordered-index']?: number })['data-ordered-index'];
-      if (typeof orderedIndex === 'number') {
-        delete (props as { ['data-ordered-index']?: number })['data-ordered-index'];
-        return (
-          <li className={className} {...props}>
-            <span className="ordered-list-marker" aria-hidden="true">{orderedIndex}.</span>
-            <div className="ordered-list-content">{children}</div>
-          </li>
-        );
-      }
-
-      return (
-        <li className={className} {...props}>
-          {children}
-        </li>
       );
     },
   }), [images]);

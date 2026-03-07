@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/export.cjs": {
+      "maxDuration": 60,
+      "memory": 1024,
+      "includeFiles": ["index.css", "styles/tailwind.css"]
+    }
+  }
+}
+

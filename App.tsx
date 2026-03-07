@@ -1,117 +1,124 @@
-import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState, useTransition } from 'react';
+import React, { useCallback, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import InputPanel from './components/CodeEditor';
 import PreviewCard from './components/PreviewCard';
 import { Eye, Smartphone, Sparkles, Download, Loader2, Check, LayoutGrid, RefreshCw, ChevronLeft, ChevronRight, Monitor } from 'lucide-react';
 import { ArticleContent } from './types';
 import { DEFAULT_ARTICLE } from './constants';
 
-const createExportPlaceholder = (message: string) => {
-  const safeMessage = message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
-  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="675">
-      <rect width="100%" height="100%" fill="#f8fafc"/>
-      <rect x="30" y="30" width="1140" height="615" rx="16" fill="#ffffff" stroke="#e2e8f0" stroke-width="2"/>
-      <text x="600" y="330" text-anchor="middle" fill="#64748b" font-size="34" font-family="system-ui, -apple-system, Segoe UI, Roboto">${safeMessage}</text>
-    </svg>`
-  )}`;
-};
-
-const isCrossOriginHttpImage = (src: string) => {
-  if (!src) return false;
-  if (src.startsWith('data:') || src.startsWith('blob:')) return false;
-
-  try {
-    const parsed = new URL(src, window.location.href);
-    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false;
-    return parsed.origin !== window.location.origin;
-  } catch {
-    return false;
-  }
-};
-
-const waitNextFrame = () => new Promise<void>((resolve) => {
-  requestAnimationFrame(() => resolve());
-});
-
-const waitForFontsToSettle = async (timeoutMs = 8000) => {
-  if (!('fonts' in document)) return;
-  try {
-    const ready = document.fonts.ready;
-    await Promise.race([
-      ready,
-      new Promise<void>((resolve) => setTimeout(resolve, timeoutMs)),
-    ]);
-  } catch {
-    // Ignore font readiness issues and proceed with export.
-  }
-};
-
-const waitForImagesToSettle = async (root: HTMLElement, timeoutMs = 8000) => {
-  const images = Array.from(root.querySelectorAll('img'));
-  await Promise.all(images.map((image) => new Promise<void>((resolve) => {
-    if (image.complete) {
-      resolve();
-      return;
-    }
-
-    let settled = false;
-    const done = () => {
-      if (settled) return;
-      settled = true;
-      image.removeEventListener('load', done);
-      image.removeEventListener('error', done);
-      resolve();
-    };
-
-    image.addEventListener('load', done, { once: true });
-    image.addEventListener('error', done, { once: true });
-    setTimeout(done, timeoutMs);
-  })));
-};
-
 type PreviewMode = 'live' | 'pages';
+
+type TemplateInfo = { id: string; name: string; css?: string };
+
+type ExportResponse = {
+  zipUrl: string;
+  pageUrls: string[];
+  pages: number;
+  missingImages?: string[];
+  templateId?: string;
+};
+
+const sanitizeFileName = (value: string) => value
+  .replace(/[\\/:*?"<>|]/g, '-')
+  .replace(/\s+/g, ' ')
+  .trim();
+
+const downloadBlobFromUrl = async (url: string, filename: string) => {
+  const response = await fetch(url);
+  if (!response.ok) {
+    throw new Error(`Download failed (${response.status})`);
+  }
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = objectUrl;
+  link.download = filename;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+};
 
 const App: React.FC = () => {
   // Use ArticleContent object instead of HTML string
   const [articleData, setArticleData] = useState<ArticleContent>(DEFAULT_ARTICLE);
   const [mobileView, setMobileView] = useState(false);
-  const cardRef = useRef<HTMLDivElement>(null);
   const [isExporting, setIsExporting] = useState(false);
   const [exportSuccess, setExportSuccess] = useState(false);
 
   const [previewMode, setPreviewMode] = useState<PreviewMode>('pages');
   const [isRenderingPages, setIsRenderingPages] = useState(false);
-  const [pagesDirty, setPagesDirty] = useState(false);
+  const [pagesDirty, setPagesDirty] = useState(true);
   const [pagesError, setPagesError] = useState<string | null>(null);
-  const [pagePreviews, setPagePreviews] = useState<Array<{ url: string; blob: Blob }>>([]);
+  const [pageUrls, setPageUrls] = useState<string[]>([]);
+  const [zipUrl, setZipUrl] = useState<string | null>(null);
+  const [missingImages, setMissingImages] = useState<string[]>([]);
   const [activePage, setActivePage] = useState(1);
   const pagesScrollerRef = useRef<HTMLDivElement>(null);
   const pageRefs = useRef<Array<HTMLDivElement | null>>([]);
   const scrollRafRef = useRef<number | null>(null);
   const hasAutoRenderedPagesRef = useRef(false);
   const contentVersionRef = useRef(0);
-  const [, startPageTransition] = useTransition();
+  const exportAbortRef = useRef<AbortController | null>(null);
 
-  useEffect(() => () => {
-    pagePreviews.forEach((page) => URL.revokeObjectURL(page.url));
-  }, [pagePreviews]);
+  const [templates, setTemplates] = useState<TemplateInfo[]>([{ id: 'default', name: 'Default', css: '' }]);
+  const [templateId, setTemplateId] = useState('default');
+  const [exportSecret, setExportSecret] = useState(() => (
+    typeof window === 'undefined' ? '' : window.localStorage.getItem('md2rn_export_secret') ?? ''
+  ));
 
   const deferredBody = useDeferredValue(articleData.body);
-  const isCapturing = isExporting || isRenderingPages;
-  const previewBody = isCapturing ? articleData.body : deferredBody;
   const previewData = useMemo<ArticleContent>(() => ({
     enTitle: articleData.enTitle,
     title: articleData.title,
     metadata: articleData.metadata,
     images: articleData.images,
-    body: previewBody,
-  }), [articleData.enTitle, articleData.title, articleData.metadata, articleData.images, previewBody]);
+    body: deferredBody,
+  }), [articleData.enTitle, articleData.title, articleData.metadata, articleData.images, deferredBody]);
 
   const handleArticleChange = useCallback((data: ArticleContent) => {
     contentVersionRef.current += 1;
     setArticleData(data);
     setPagesDirty(true);
+    setPagesError(null);
   }, []);
+
+  const selectedTemplateCss = useMemo(() => templates.find((tpl) => tpl.id === templateId)?.css ?? '', [templates, templateId]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void (async () => {
+      try {
+        const response = await fetch('/api/templates', { signal: controller.signal });
+        if (!response.ok) return;
+        const data = await response.json() as { templates?: TemplateInfo[] };
+        if (!Array.isArray(data.templates)) return;
+        setTemplates(data.templates);
+      } catch {
+        // ignore
+      }
+    })();
+    return () => controller.abort();
+  }, []);
+
+  useEffect(() => {
+    if (templates.some((tpl) => tpl.id === templateId)) return;
+    setTemplateId('default');
+  }, [templates, templateId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    if (!exportSecret) {
+      window.localStorage.removeItem('md2rn_export_secret');
+      return;
+    }
+    window.localStorage.setItem('md2rn_export_secret', exportSecret);
+  }, [exportSecret]);
+
+  const handleTemplateChange = useCallback((next: string) => {
+    if (next === templateId) return;
+    contentVersionRef.current += 1;
+    setTemplateId(next);
+    setPagesDirty(true);
+    setPagesError(null);
+  }, [templateId]);
 
   const updateActivePageFromScroll = useCallback(() => {
     const container = pagesScrollerRef.current;
@@ -145,135 +152,42 @@ const App: React.FC = () => {
   }, [updateActivePageFromScroll]);
 
   const scrollToPage = useCallback((pageNumber: number) => {
-    const totalPages = pagePreviews.length;
+    const totalPages = pageUrls.length;
     if (totalPages < 1) return;
     const clamped = Math.min(Math.max(pageNumber, 1), totalPages);
     setActivePage(clamped);
     pageRefs.current[clamped - 1]?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'center' });
-  }, [pagePreviews.length]);
+  }, [pageUrls.length]);
 
-  const renderPageBlobs = useCallback(async (): Promise<Blob[]> => {
-    let target = cardRef.current;
-    if (!target) {
-      await waitNextFrame();
-      target = cardRef.current;
-    }
-    if (!target) {
-      throw new Error('Preview card is not ready yet.');
-    }
+  const requestExport = useCallback(async (): Promise<ExportResponse> => {
+    exportAbortRef.current?.abort();
+    const controller = new AbortController();
+    exportAbortRef.current = controller;
 
-    const html2canvasPromise = import('html2canvas');
-    await waitNextFrame();
-
-    const display = window.getComputedStyle(target).display;
-    if (display === 'none') {
-      throw new Error('Preview card is hidden. Please switch to preview before exporting.');
-    }
-
-    const sourceBounds = target.getBoundingClientRect();
-    const sourceWidth = Math.max(Math.ceil(sourceBounds.width), target.clientWidth, target.scrollWidth);
-    if (sourceWidth < 1) {
-      throw new Error('Preview card is not visible yet. Please try again after it is rendered.');
-    }
-
-    const sandbox = document.createElement('div');
-    sandbox.style.position = 'fixed';
-    sandbox.style.left = '-100000px';
-    sandbox.style.top = '0';
-    sandbox.style.pointerEvents = 'none';
-    sandbox.style.background = '#ffffff';
-    sandbox.style.zIndex = '-1';
-
-    const clonedTarget = target.cloneNode(true) as HTMLDivElement;
-    clonedTarget.style.width = `${sourceWidth}px`;
-    clonedTarget.style.maxWidth = `${sourceWidth}px`;
-    clonedTarget.style.minHeight = 'auto';
-    clonedTarget.style.height = 'auto';
-    clonedTarget.style.transform = 'none';
-
-    const clonedImages = clonedTarget.querySelectorAll('img');
-    clonedImages.forEach((img) => {
-      if (isCrossOriginHttpImage(img.src)) {
-        img.src = createExportPlaceholder('External image skipped during export');
-      }
+    const response = await fetch('/api/export', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        ...(exportSecret ? { Authorization: `Bearer ${exportSecret}` } : {}),
+      },
+      signal: controller.signal,
+      body: JSON.stringify({
+        article: articleData,
+        templateId,
+        options: { width: 600, ratio: 4 / 3, padding: 50, dpr: 3 },
+      }),
     });
 
-    sandbox.appendChild(clonedTarget);
-    document.body.appendChild(sandbox);
-
-    let canvas: HTMLCanvasElement | null = null;
-    try {
-      await waitNextFrame();
-      await waitForFontsToSettle();
-      await waitForImagesToSettle(clonedTarget);
-
-      const cloneBounds = clonedTarget.getBoundingClientRect();
-      const width = Math.max(Math.ceil(cloneBounds.width), clonedTarget.clientWidth, clonedTarget.scrollWidth);
-      const height = Math.max(Math.ceil(cloneBounds.height), clonedTarget.clientHeight, clonedTarget.scrollHeight);
-
-      if (width < 1 || height < 1) {
-        throw new Error('Export failed because preview content has zero size.');
+    const data = await response.json().catch(() => ({} as Partial<ExportResponse> & { error?: string }));
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new Error('Export API not found. If running locally, use `vercel dev` or deploy to Vercel.');
       }
-
-      const { default: html2canvas } = await html2canvasPromise;
-      canvas = await html2canvas(clonedTarget, {
-        scale: 3,
-        backgroundColor: '#ffffff',
-        useCORS: true,
-        imageTimeout: 15000,
-        width,
-        height,
-      });
-    } finally {
-      sandbox.remove();
+      throw new Error((data && typeof data.error === 'string' && data.error) || `Export failed (${response.status})`);
     }
 
-    if (!canvas || canvas.width < 1 || canvas.height < 1) {
-      throw new Error('Export failed because captured canvas has zero size. Keep preview visible and try again.');
-    }
-
-    const sliceWidth = canvas.width;
-    const sliceHeight = Math.max(1, Math.round(sliceWidth * (4 / 3)));
-    const totalHeight = canvas.height;
-    const numSlices = Math.max(1, Math.ceil(totalHeight / sliceHeight));
-
-    const blobs: Blob[] = [];
-    for (let i = 0; i < numSlices; i++) {
-      const sliceCanvas = document.createElement('canvas');
-      sliceCanvas.width = sliceWidth;
-      sliceCanvas.height = sliceHeight;
-      const ctx = sliceCanvas.getContext('2d');
-      if (!ctx) continue;
-
-      ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, sliceWidth, sliceHeight);
-
-      const sourceY = i * sliceHeight;
-      const remainingHeight = totalHeight - sourceY;
-      const drawHeight = Math.min(sliceHeight, remainingHeight);
-      if (drawHeight <= 0) continue;
-
-      ctx.drawImage(
-        canvas,
-        0, sourceY, sliceWidth, drawHeight,
-        0, 0, sliceWidth, drawHeight
-      );
-
-      const blob = await new Promise<Blob>((resolve, reject) => {
-        sliceCanvas.toBlob((value) => {
-          if (!value) {
-            reject(new Error('Failed to encode image.'));
-            return;
-          }
-          resolve(value);
-        }, 'image/png');
-      });
-
-      blobs.push(blob);
-    }
-
-    return blobs;
-  }, []);
+    return data as ExportResponse;
+  }, [articleData, exportSecret, templateId]);
 
   const regeneratePages = useCallback(async () => {
     if (isRenderingPages) return;
@@ -282,24 +196,23 @@ const App: React.FC = () => {
 
     const versionAtStart = contentVersionRef.current;
     try {
-      const blobs = await renderPageBlobs();
-      if (contentVersionRef.current !== versionAtStart) {
-        return;
-      }
+      const data = await requestExport();
+      if (contentVersionRef.current !== versionAtStart) return;
 
-      const previews = blobs.map((blob) => ({ blob, url: URL.createObjectURL(blob) }));
-      startPageTransition(() => {
-        setPagePreviews(previews);
-        setActivePage(1);
-        setPagesDirty(false);
-      });
+      setPageUrls(Array.isArray(data.pageUrls) ? data.pageUrls : []);
+      setZipUrl(typeof data.zipUrl === 'string' ? data.zipUrl : null);
+      setMissingImages(Array.isArray(data.missingImages) ? data.missingImages : []);
+      setActivePage(1);
+      setPagesDirty(false);
+
       setTimeout(() => scrollToPage(1), 0);
     } catch (err) {
+      if (err instanceof DOMException && err.name === 'AbortError') return;
       setPagesError(err instanceof Error ? err.message : 'Failed to render page previews.');
     } finally {
       setIsRenderingPages(false);
     }
-  }, [isRenderingPages, renderPageBlobs, scrollToPage, startPageTransition]);
+  }, [isRenderingPages, requestExport, scrollToPage]);
 
   useEffect(() => {
     if (previewMode !== 'pages') return;
@@ -308,53 +221,43 @@ const App: React.FC = () => {
     void regeneratePages();
   }, [previewMode, regeneratePages]);
 
-  useEffect(() => {
-    if (previewMode !== 'pages') return;
-    if (!pagesDirty) return;
-    if (isRenderingPages || isExporting) return;
-
-    const timer = window.setTimeout(() => {
-      void regeneratePages();
-    }, 650);
-
-    return () => window.clearTimeout(timer);
-  }, [isExporting, isRenderingPages, pagesDirty, previewMode, regeneratePages]);
-
   const handleExport = async () => {
     setIsExporting(true);
     try {
-      const jszipPromise = import('jszip');
-      const blobs = (previewMode === 'pages' && !pagesDirty && pagePreviews.length > 0)
-        ? pagePreviews.map((page) => page.blob)
-        : await renderPageBlobs();
+      setPagesError(null);
+      const versionAtStart = contentVersionRef.current;
 
-      if (previewMode === 'pages') {
-        const previews = blobs.map((blob) => ({ blob, url: URL.createObjectURL(blob) }));
-        startPageTransition(() => {
-          setPagePreviews(previews);
-          setActivePage(1);
+      let nextZipUrl = zipUrl;
+      let nextPageUrls = pageUrls;
+      let nextMissing = missingImages;
+
+      if (!nextZipUrl || pagesDirty) {
+        const data = await requestExport();
+        nextZipUrl = typeof data.zipUrl === 'string' ? data.zipUrl : null;
+        nextPageUrls = Array.isArray(data.pageUrls) ? data.pageUrls : [];
+        nextMissing = Array.isArray(data.missingImages) ? data.missingImages : [];
+
+        if (contentVersionRef.current === versionAtStart) {
+          setZipUrl(nextZipUrl);
+          setPageUrls(nextPageUrls);
+          setMissingImages(nextMissing);
           setPagesDirty(false);
-        });
+          setActivePage(1);
+        }
       }
 
-      const { default: JSZip } = await jszipPromise;
-      const zip = new JSZip();
-      blobs.forEach((blob, index) => {
-        zip.file(`rednote-page-${index + 1}.png`, blob);
-      });
+      if (!nextZipUrl) {
+        throw new Error('Export failed: missing zip URL.');
+      }
 
-      const content = await zip.generateAsync({ type: 'blob' });
-      const link = document.createElement('a');
-      const objectUrl = URL.createObjectURL(content);
-      link.href = objectUrl;
-      link.download = `rednote-export-${Date.now()}.zip`;
-      link.click();
-      setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+      const titlePart = sanitizeFileName(articleData.title || 'rednote-export') || 'rednote-export';
+      await downloadBlobFromUrl(nextZipUrl, `${titlePart}-${Date.now()}.zip`);
       
       setExportSuccess(true);
       setTimeout(() => setExportSuccess(false), 2000);
     } catch (err) {
       console.error('Failed to export images:', err);
+      setPagesError(err instanceof Error ? err.message : 'Export failed.');
     } finally {
       setIsExporting(false);
     }
@@ -362,6 +265,7 @@ const App: React.FC = () => {
 
   return (
     <div className="flex flex-col h-screen w-full bg-[#0f0f1a] text-white overflow-hidden">
+      <style>{selectedTemplateCss}</style>
       {/* Header */}
       <header className="h-14 bg-[#1a1b26] border-b border-slate-700 flex items-center justify-between px-6 shrink-0 z-10">
         <div className="flex items-center gap-2">
@@ -388,7 +292,7 @@ const App: React.FC = () => {
               type="button"
               onClick={() => {
                 setPreviewMode('pages');
-                if (pagePreviews.length === 0 || pagesDirty) {
+                if (pageUrls.length === 0 || pagesDirty) {
                   void regeneratePages();
                 }
               }}
@@ -405,8 +309,31 @@ const App: React.FC = () => {
             </button>
           </div>
 
-          <button
-            onClick={handleExport}
+	          <div className="hidden md:flex items-center gap-2">
+	            <span className="text-xs text-slate-400">Template</span>
+            <select
+              value={templateId}
+              onChange={(e) => handleTemplateChange(e.target.value)}
+              className="h-8 rounded-md bg-slate-900/40 border border-slate-700 px-2 text-xs text-slate-200 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+              aria-label="Template"
+            >
+              {templates.map((tpl) => (
+                <option key={tpl.id} value={tpl.id}>{tpl.name}</option>
+              ))}
+	            </select>
+	          </div>
+
+          <input
+            type="password"
+            value={exportSecret}
+            onChange={(e) => setExportSecret(e.target.value)}
+            placeholder="Export secret (optional)"
+            className="hidden md:block h-8 w-48 rounded-md bg-slate-900/40 border border-slate-700 px-2 text-xs text-slate-200 placeholder:text-slate-500 focus:outline-none focus:ring-2 focus:ring-indigo-500/40"
+            aria-label="Export secret"
+          />
+
+	          <button
+	            onClick={handleExport}
             disabled={isExporting || isRenderingPages}
             className={`
               hidden md:flex items-center gap-2 px-4 py-1.5 rounded-full font-medium text-xs transition-all
@@ -423,7 +350,7 @@ const App: React.FC = () => {
             ) : (
               <Download size={14} />
             )}
-            {exportSuccess ? 'Saved!' : 'Export Image'}
+            {exportSuccess ? 'Saved!' : 'Export ZIP'}
           </button>
 
           <button 
@@ -440,7 +367,7 @@ const App: React.FC = () => {
               onClick={() => {
                 const nextMode: PreviewMode = previewMode === 'live' ? 'pages' : 'live';
                 setPreviewMode(nextMode);
-                if (nextMode === 'pages' && (pagePreviews.length === 0 || pagesDirty)) {
+                if (nextMode === 'pages' && (pageUrls.length === 0 || pagesDirty)) {
                   void regeneratePages();
                 }
               }}
@@ -478,111 +405,111 @@ const App: React.FC = () => {
                 }}>
 	           </div>
 
-	           <div className="w-full h-full relative z-10 overflow-hidden">
-               {previewMode === 'live' ? (
-                 <div className="w-full h-full overflow-y-auto custom-scrollbar">
-                   <PreviewCard ref={cardRef} data={previewData} />
-                 </div>
-               ) : (
-                 <div className="w-full h-full flex flex-col">
-                   <div className="absolute inset-0 opacity-0 pointer-events-none">
-                     <div className="w-full h-full overflow-y-auto">
-                       <PreviewCard ref={cardRef} data={previewData} />
-                     </div>
-                   </div>
-
-                   <div
-                     ref={pagesScrollerRef}
-                     onScroll={handlePagesScroll}
-                     className="flex-1 overflow-x-auto overflow-y-auto custom-scrollbar snap-x snap-mandatory"
-                   >
-                     <div className="h-full flex items-start gap-8 px-8 py-8">
-                       {pagePreviews.length === 0 ? (
-                         <div className="w-full h-full flex items-center justify-center">
-                           <div className="max-w-md text-center space-y-4">
-                             <div className="text-sm text-slate-300">分页预览会生成与导出一致的图片。</div>
-                             {pagesError && <div className="text-xs text-red-300">{pagesError}</div>}
-                             <button
-                               type="button"
-                               onClick={() => void regeneratePages()}
-                               disabled={isRenderingPages || isExporting}
+		           <div className="w-full h-full relative z-10 overflow-hidden">
+	               {previewMode === 'live' ? (
+	                 <div className="w-full h-full overflow-y-auto custom-scrollbar">
+	                   <PreviewCard data={previewData} />
+	                 </div>
+	               ) : (
+	                 <div className="w-full h-full flex flex-col">
+	                   <div
+	                     ref={pagesScrollerRef}
+	                     onScroll={handlePagesScroll}
+	                     className="flex-1 overflow-x-auto overflow-y-auto custom-scrollbar snap-x snap-mandatory"
+	                   >
+	                     <div className="h-full flex items-start gap-8 px-8 py-8">
+	                       {pageUrls.length === 0 ? (
+	                         <div className="w-full h-full flex items-center justify-center">
+	                           <div className="max-w-md text-center space-y-4">
+	                             <div className="text-sm text-slate-300">分页预览会生成与导出一致的图片（服务端渲染）。</div>
+	                             {pagesError && <div className="text-xs text-red-300">{pagesError}</div>}
+	                             {missingImages.length > 0 && (
+	                               <div className="text-xs text-orange-200">
+	                                 有 {missingImages.length} 张图片未能渲染（请检查图片链接/上传）。
+	                               </div>
+	                             )}
+	                             <button
+	                               type="button"
+	                               onClick={() => void regeneratePages()}
+	                               disabled={isRenderingPages || isExporting}
                                className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-60 disabled:hover:bg-indigo-600"
                              >
                                {isRenderingPages ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                               生成分页预览
-                             </button>
-                           </div>
-                         </div>
-                       ) : (
-                         pagePreviews.map((page, index) => (
-                           <div
-                             key={page.url}
-                             ref={(el) => { pageRefs.current[index] = el; }}
-                             className="snap-center shrink-0 w-[320px] sm:w-[360px] md:w-[420px] lg:w-[520px]"
-                           >
-                             <div className="bg-white rounded-2xl overflow-hidden shadow-[0_25px_50px_rgba(0,0,0,0.35),0_10px_30px_rgba(0,10,20,0.25),0_5px_15px_rgba(0,5,15,0.2)]">
-                               <img src={page.url} alt={`Page ${index + 1}`} className="w-full h-auto block" />
-                             </div>
-                             <div className="mt-3 text-center text-xs text-slate-400">第 {index + 1} 页</div>
-                           </div>
-                         ))
-                       )}
+	                               生成分页预览
+	                             </button>
+	                           </div>
+	                         </div>
+	                       ) : (
+	                         pageUrls.map((url, index) => (
+	                           <div
+	                             key={`${index}-${url}`}
+	                             ref={(el) => { pageRefs.current[index] = el; }}
+	                             className="snap-center shrink-0 w-[320px] sm:w-[360px] md:w-[420px] lg:w-[520px]"
+	                           >
+	                             <div className="bg-white rounded-2xl overflow-hidden shadow-[0_25px_50px_rgba(0,0,0,0.35),0_10px_30px_rgba(0,10,20,0.25),0_5px_15px_rgba(0,5,15,0.2)]">
+	                               <img src={url} alt={`Page ${index + 1}`} className="w-full h-auto block" />
+	                             </div>
+	                             <div className="mt-3 text-center text-xs text-slate-400">第 {index + 1} 页</div>
+	                           </div>
+	                         ))
+	                       )}
                      </div>
                    </div>
 
-                   <div className="h-14 shrink-0 border-t border-slate-700 bg-[#1a1b26] px-6 flex items-center justify-between">
-                     <div className="text-xs text-slate-400">
-                       {pagePreviews.length > 0 ? `第 ${activePage} / ${pagePreviews.length} 页` : '未生成分页预览'}
-                       {pagesDirty && pagePreviews.length > 0 ? ' · 内容已更新' : ''}
-                     </div>
+	                   <div className="h-14 shrink-0 border-t border-slate-700 bg-[#1a1b26] px-6 flex items-center justify-between">
+	                     <div className="text-xs text-slate-400">
+	                       {pageUrls.length > 0 ? `第 ${activePage} / ${pageUrls.length} 页` : '未生成分页预览'}
+	                       {pagesDirty && pageUrls.length > 0 ? ' · 内容已更新' : ''}
+	                       {missingImages.length > 0 && pageUrls.length > 0 ? ` · ${missingImages.length} 张图片未渲染` : ''}
+	                     </div>
 
-                     <div className="flex items-center gap-2">
-                       <button
-                         type="button"
-                         onClick={() => scrollToPage(activePage - 1)}
-                         disabled={pagePreviews.length < 2 || activePage <= 1}
-                         className="p-2 rounded-md bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800"
-                         title="Previous page"
-                       >
+	                     <div className="flex items-center gap-2">
+	                       <button
+	                         type="button"
+	                         onClick={() => scrollToPage(activePage - 1)}
+	                         disabled={pageUrls.length < 2 || activePage <= 1}
+	                         className="p-2 rounded-md bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800"
+	                         title="Previous page"
+	                       >
                          <ChevronLeft size={16} />
                        </button>
 
-                       <input
-                         type="range"
-                         min={1}
-                         max={Math.max(1, pagePreviews.length)}
-                         value={Math.min(activePage, Math.max(1, pagePreviews.length))}
-                         onChange={(e) => scrollToPage(Number(e.target.value))}
-                         disabled={pagePreviews.length < 2}
-                         className="w-32 md:w-48 accent-indigo-500 disabled:opacity-40"
-                         aria-label="Page"
-                       />
+	                       <input
+	                         type="range"
+	                         min={1}
+	                         max={Math.max(1, pageUrls.length)}
+	                         value={Math.min(activePage, Math.max(1, pageUrls.length))}
+	                         onChange={(e) => scrollToPage(Number(e.target.value))}
+	                         disabled={pageUrls.length < 2}
+	                         className="w-32 md:w-48 accent-indigo-500 disabled:opacity-40"
+	                         aria-label="Page"
+	                       />
 
-                       <button
-                         type="button"
-                         onClick={() => scrollToPage(activePage + 1)}
-                         disabled={pagePreviews.length < 2 || activePage >= pagePreviews.length}
-                         className="p-2 rounded-md bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800"
-                         title="Next page"
-                       >
+	                       <button
+	                         type="button"
+	                         onClick={() => scrollToPage(activePage + 1)}
+	                         disabled={pageUrls.length < 2 || activePage >= pageUrls.length}
+	                         className="p-2 rounded-md bg-slate-800 text-slate-200 hover:bg-slate-700 disabled:opacity-40 disabled:hover:bg-slate-800"
+	                         title="Next page"
+	                       >
                          <ChevronRight size={16} />
                        </button>
 
-                       <button
-                         type="button"
-                         onClick={() => void regeneratePages()}
-                         disabled={isRenderingPages || isExporting}
-                         className="ml-2 inline-flex items-center gap-2 px-3 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-60 disabled:hover:bg-indigo-600"
-                         title={pagesDirty ? 'Refresh preview' : 'Re-render preview'}
-                       >
-                         {isRenderingPages ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-                         刷新
-                       </button>
-                     </div>
-                   </div>
-                 </div>
-               )}
-	           </div>
+	                       <button
+	                         type="button"
+	                         onClick={() => void regeneratePages()}
+	                         disabled={isRenderingPages || isExporting}
+	                         className="ml-2 inline-flex items-center gap-2 px-3 py-2 rounded-md bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-medium disabled:opacity-60 disabled:hover:bg-indigo-600"
+	                         title={pagesDirty ? 'Refresh preview' : 'Re-render preview'}
+	                       >
+	                         {isRenderingPages ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
+	                         刷新
+	                       </button>
+	                     </div>
+	                   </div>
+	                 </div>
+	               )}
+		           </div>
 	        </div>
 	      </main>
 	    </div>

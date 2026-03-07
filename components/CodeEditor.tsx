@@ -161,7 +161,7 @@ const InputPanel: React.FC<EditorProps> = ({ onChange, initialData }) => {
         />
         <div className="flex-1"></div>
         <button 
-          onClick={() => setArticle({enTitle: '', title: '', metadata: '', body: ''})}
+          onClick={() => setArticle({ enTitle: '', title: '', metadata: '', body: '', images: {} })}
           className="p-1.5 text-slate-400 hover:text-red-400 hover:bg-red-400/10 rounded transition-colors"
           title="Clear All"
         >
