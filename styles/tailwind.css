@@ -124,7 +124,7 @@ code.hljs {
 
 .typo-content h1 {
   font-family: 'Noto Serif SC', serif;
-  font-size: 36px;
+  font-size: 40px;
   font-weight: 700;
   color: #000000;
   line-height: 1.3;
@@ -133,7 +133,7 @@ code.hljs {
 
 @media (min-width: 650px) {
   .typo-content h1 {
-    font-size: 48px;
+    font-size: 54px;
   }
 }
 
@@ -303,6 +303,69 @@ code.hljs {
   margin-bottom: 0;
 }
 
+.typo-content .md2rn-table {
+  width: 100%;
+  margin: 24px 0 28px;
+  table-layout: fixed;
+  border-collapse: collapse;
+  background: #ffffff;
+  break-inside: avoid;
+  page-break-inside: avoid;
+}
+
+.typo-content .md2rn-table-head {
+  background: #f8fafc;
+}
+
+.typo-content .md2rn-table-header-cell,
+.typo-content .md2rn-table-cell {
+  border: 1px solid #e2e8f0;
+  padding: 12px 14px;
+  text-align: left;
+  vertical-align: top;
+  line-height: 1.5;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.typo-content .md2rn-table-header-cell {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 16px;
+  font-weight: 700;
+  color: #111827;
+}
+
+.typo-content .md2rn-table-cell {
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 15px;
+  color: #1f2937;
+  background: #ffffff;
+}
+
+@media (min-width: 650px) {
+  .typo-content .md2rn-table-header-cell {
+    font-size: 17px;
+  }
+
+  .typo-content .md2rn-table-cell {
+    font-size: 16px;
+  }
+}
+
+.typo-content .md2rn-table-cell > :last-child,
+.typo-content .md2rn-table-header-cell > :last-child {
+  margin-bottom: 0;
+}
+
+.typo-content .md2rn-table-cell code,
+.typo-content .md2rn-table-header-cell code {
+  font-size: 0.88em;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
 .typo-content blockquote {
   border-left: 4px solid #4a9eff;
   padding-left: 20px;
@@ -318,7 +381,6 @@ code.hljs {
   max-width: 100%;
   border-radius: 8px;
   margin: 20px 0;
-  box-shadow: 0 4px 12px rgba(0,0,0,0.1);
   display: block;
 }
 

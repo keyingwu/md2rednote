@@ -1,9 +1,10 @@
-import { readFile } from 'node:fs/promises';
+import { access, readFile, readdir } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { chromium as playwrightChromium } from 'playwright-core';
 import { resolveTemplate } from '../templates.js';
+import { MARKDOWN_TABLE_CLASS_NAMES } from '../markdownTableClasses.js';
 import { unified } from 'unified';
 import remarkParse from 'remark-parse';
 import remarkGfm from 'remark-gfm';
@@ -16,6 +17,25 @@ import { visit } from 'unist-util-visit';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const repoRoot = path.resolve(__dirname, '..');
+const ancestorSearchRootsCache = new Map();
+const imageFileIndexCache = new Map();
+const MAX_IMAGE_SEARCH_ANCESTOR_DEPTH = 8;
+const MAX_IMAGE_INDEX_ANCESTOR_DEPTH = 6;
+const IMAGE_FILE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.gif', '.webp', '.svg']);
+const SKIPPED_INDEX_DIRS = new Set([
+  '.git',
+  '.hg',
+  '.svn',
+  '.jj',
+  '.obsidian',
+  '.trash',
+  'node_modules',
+  '.next',
+  'dist',
+  'build',
+  'coverage',
+  '.cache',
+]);
 
 const escapeHtml = (value) => value
   .replace(/&/g, '&amp;')
@@ -24,25 +44,37 @@ const escapeHtml = (value) => value
   .replace(/"/g, '&quot;')
   .replace(/'/g, '&#39;');
 
-export const extractLeadingH1 = (markdown) => {
+const stripLeadingFrontmatter = (markdown) => {
   const lines = markdown.split(/\r?\n/);
   let cursor = 0;
 
   while (cursor < lines.length && lines[cursor].trim() === '') cursor += 1;
+  if (cursor >= lines.length || lines[cursor].trim() !== '---') return markdown;
 
-  if (cursor < lines.length && lines[cursor].trim() === '---') {
-    cursor += 1;
-    while (cursor < lines.length && lines[cursor].trim() !== '---') cursor += 1;
-    if (cursor < lines.length && lines[cursor].trim() === '---') cursor += 1;
-    while (cursor < lines.length && lines[cursor].trim() === '') cursor += 1;
-  }
+  const frontmatterStart = cursor;
+  cursor += 1;
+  while (cursor < lines.length && lines[cursor].trim() !== '---') cursor += 1;
+  if (cursor >= lines.length) return markdown;
+
+  cursor += 1;
+  while (cursor < lines.length && lines[cursor].trim() === '') cursor += 1;
+
+  return lines.slice(0, frontmatterStart).concat(lines.slice(cursor)).join('\n');
+};
+
+export const extractLeadingH1 = (markdown) => {
+  const cleanedMarkdown = stripLeadingFrontmatter(markdown);
+  const lines = cleanedMarkdown.split(/\r?\n/);
+  let cursor = 0;
+
+  while (cursor < lines.length && lines[cursor].trim() === '') cursor += 1;
 
   const headingLine = lines[cursor] ?? '';
   const match = headingLine.match(/^#(?!#)\s+(.+?)\s*$/);
-  if (!match) return { title: null, body: markdown };
+  if (!match) return { title: null, body: cleanedMarkdown };
 
   const title = (match[1] || '').replace(/\s+#\s*$/, '').trim();
-  if (!title) return { title: null, body: markdown };
+  if (!title) return { title: null, body: cleanedMarkdown };
 
   const nextLines = lines.slice(0, cursor).concat(lines.slice(cursor + 1));
   if (cursor < nextLines.length && nextLines[cursor].trim() === '') {
@@ -200,6 +232,110 @@ const rehypeOrderedList = () => (tree) => {
   });
 };
 
+const TABLE_TAG_TO_CLASS_NAME = {
+  table: MARKDOWN_TABLE_CLASS_NAMES.table,
+  thead: MARKDOWN_TABLE_CLASS_NAMES.thead,
+  tbody: MARKDOWN_TABLE_CLASS_NAMES.tbody,
+  tr: MARKDOWN_TABLE_CLASS_NAMES.tr,
+  th: MARKDOWN_TABLE_CLASS_NAMES.th,
+  td: MARKDOWN_TABLE_CLASS_NAMES.td,
+};
+
+const appendClassName = (node, className) => {
+  const existingClassName = node.properties?.className;
+  const classNames = Array.isArray(existingClassName)
+    ? [...existingClassName]
+    : typeof existingClassName === 'string'
+      ? existingClassName.split(/\s+/).filter(Boolean)
+      : [];
+
+  if (!classNames.includes(className)) classNames.push(className);
+  node.properties = { ...(node.properties || {}), className: classNames };
+};
+
+const rehypeTableClasses = () => (tree) => {
+  visit(tree, 'element', (node) => {
+    const className = TABLE_TAG_TO_CLASS_NAME[node.tagName];
+    if (!className) return;
+    appendClassName(node, className);
+  });
+};
+
+const rehypeLiftImagesOutOfParagraphs = () => (tree) => {
+  visit(tree, 'element', (node, index, parent) => {
+    if (!parent || typeof index !== 'number' || node.tagName !== 'p' || !Array.isArray(node.children)) return;
+
+    const baseClassName = Array.isArray(node.properties?.className)
+      ? node.properties.className
+      : typeof node.properties?.className === 'string'
+        ? node.properties.className.split(' ').filter(Boolean)
+        : [];
+    if (baseClassName.includes('md2rn-image-block')) return;
+
+    const hasDirectImage = node.children.some((child) => child?.type === 'element' && child.tagName === 'img');
+    if (!hasDirectImage) return;
+
+    const substantiveChildren = node.children.filter((child) => {
+      if (!child) return false;
+      if (child.type === 'text') return child.value.replace(/\s+/g, '').length > 0;
+      return true;
+    });
+    if (substantiveChildren.length === 1 && substantiveChildren[0]?.type === 'element' && substantiveChildren[0].tagName === 'img') {
+      node.properties = {
+        ...(node.properties || {}),
+        className: [...baseClassName, 'md2rn-image-block'],
+      };
+      return;
+    }
+
+    const replacements = [];
+    let currentChildren = [];
+
+    const flushParagraph = () => {
+      const hasSubstance = currentChildren.some((child) => {
+        if (!child) return false;
+        if (child.type === 'text') return child.value.replace(/\s+/g, '').length > 0;
+        return true;
+      });
+
+      if (!hasSubstance) {
+        currentChildren = [];
+        return;
+      }
+
+      replacements.push({
+        ...node,
+        children: currentChildren,
+      });
+      currentChildren = [];
+    };
+
+    for (const child of node.children) {
+      if (child?.type === 'element' && child.tagName === 'img') {
+        flushParagraph();
+        replacements.push({
+          type: 'element',
+          tagName: 'p',
+          properties: {
+            ...(node.properties || {}),
+            className: [...baseClassName, 'md2rn-image-block'],
+          },
+          children: [child],
+        });
+        continue;
+      }
+
+      currentChildren.push(child);
+    }
+
+    flushParagraph();
+    if (replacements.length > 0) {
+      parent.children.splice(index, 1, ...replacements);
+      return [index + replacements.length, 0];
+    }
+  });
+};
+
 const rehypeImageMap = (images) => (tree) => {
   if (!images || typeof images !== 'object') return;
   visit(tree, 'element', (node) => {
@@ -256,7 +392,87 @@ const guessImageMimeType = (filePath) => {
 
 const stripQueryAndHash = (src) => src.split('#')[0].split('?')[0];
 
-const resolveLocalImagePath = (rawSrc, baseDir) => {
+const pathExists = async (candidate) => {
+  try {
+    await access(candidate);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const collectAncestorSearchRoots = (startDir) => {
+  if (ancestorSearchRootsCache.has(startDir)) return ancestorSearchRootsCache.get(startDir);
+
+  const roots = [];
+  let current = startDir;
+  let depth = 0;
+  const homeDir = process.env.HOME ? path.resolve(process.env.HOME) : null;
+
+  while (current && depth <= MAX_IMAGE_SEARCH_ANCESTOR_DEPTH) {
+    roots.push(current);
+
+    if (homeDir && current === homeDir) break;
+
+    const parent = path.dirname(current);
+    if (parent === current) break;
+    current = parent;
+    depth += 1;
+  }
+
+  ancestorSearchRootsCache.set(startDir, roots);
+  return roots;
+};
+
+const indexImageFilesRecursively = async (rootDir) => {
+  if (imageFileIndexCache.has(rootDir)) return imageFileIndexCache.get(rootDir);
+
+  const indexPromise = (async () => {
+    const index = new Map();
+
+    const walk = async (dir) => {
+      const entries = await readdir(dir, { withFileTypes: true });
+      await Promise.all(entries.map(async (entry) => {
+        const absolutePath = path.join(dir, entry.name);
+
+        if (entry.isDirectory()) {
+          if (SKIPPED_INDEX_DIRS.has(entry.name)) return;
+          await walk(absolutePath);
+          return;
+        }
+
+        if (!entry.isFile()) return;
+        if (!IMAGE_FILE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) return;
+
+        const key = entry.name.toLowerCase();
+        const matches = index.get(key) || [];
+        matches.push(absolutePath);
+        index.set(key, matches);
+      }));
+    };
+
+    await walk(rootDir);
+    return index;
+  })();
+
+  imageFileIndexCache.set(rootDir, indexPromise);
+  return indexPromise;
+};
+
+const chooseNearestPath = (matches, baseDir) => {
+  if (matches.length <= 1) return matches[0] || null;
+
+  return [...matches].sort((left, right) => {
+    const leftRelative = path.relative(baseDir, left);
+    const rightRelative = path.relative(baseDir, right);
+    const leftEscapes = leftRelative.startsWith('..');
+    const rightEscapes = rightRelative.startsWith('..');
+    if (leftEscapes !== rightEscapes) return leftEscapes ? 1 : -1;
+    return leftRelative.length - rightRelative.length;
+  })[0] || null;
+};
+
+const resolveLocalImagePath = async (rawSrc, baseDir) => {
   const src = stripQueryAndHash(rawSrc);
   const decoded = (() => {
     try {
@@ -274,9 +490,27 @@ const resolveLocalImagePath = (rawSrc, baseDir) => {
     }
   }
 
-  if (path.isAbsolute(decoded)) return decoded;
+  if (path.isAbsolute(decoded)) return (await pathExists(decoded)) ? decoded : null;
   if (!baseDir) return null;
-  return path.resolve(baseDir, decoded);
+
+  const searchRoots = collectAncestorSearchRoots(baseDir);
+  for (const searchRoot of searchRoots) {
+    const directCandidate = path.resolve(searchRoot, decoded);
+    if (await pathExists(directCandidate)) return directCandidate;
+  }
+
+  if (decoded.includes('/') || decoded.includes('\\')) return null;
+
+  const fileName = path.basename(decoded).toLowerCase();
+  const indexedRoots = searchRoots.slice(0, MAX_IMAGE_INDEX_ANCESTOR_DEPTH + 1);
+  for (const searchRoot of indexedRoots) {
+    const index = await indexImageFilesRecursively(searchRoot);
+    const matches = index.get(fileName) || [];
+    const chosen = chooseNearestPath(matches, baseDir);
+    if (chosen) return chosen;
+  }
+
+  return null;
 };
 
 const rehypeInlineLocalImages = ({ baseDir, missing }) => async (tree) => {
@@ -292,7 +526,7 @@ const rehypeInlineLocalImages = ({ baseDir, missing }) => async (tree) => {
   });
 
   await Promise.all(tasks.map(async ({ node, src }) => {
-    const resolved = resolveLocalImagePath(src, baseDir);
+    const resolved = await resolveLocalImagePath(src, baseDir);
     if (!resolved) {
       missing?.push(src);
       return;
@@ -324,7 +558,9 @@ export const markdownToHtml = async (markdown, images, { baseDir, missingImages 
     .use(remarkRehype, { allowDangerousHtml: true })
     .use(rehypeRaw)
     .use(rehypeHighlight)
+    .use(rehypeLiftImagesOutOfParagraphs)
     .use(rehypeOrderedList)
+    .use(rehypeTableClasses)
     .use(rehypeImageMap, images)
     .use(rehypeInlineLocalImages, { baseDir, missing: missingImages })
     .use(rehypeStringify, { allowDangerousHtml: true })
@@ -403,6 +639,12 @@ export const buildHtmlDocument = async ({
     #md2rn-flow p,
     #md2rn-flow li {
       break-inside: auto;
+    }
+    #md2rn-flow p.md2rn-image-block {
+      break-inside: avoid;
+    }
+    #md2rn-flow p.md2rn-image-block img {
+      margin: 0;
     }
   `;
 
@@ -491,6 +733,48 @@ const computePages = async (page) => {
   });
 };
 
+const resolveLocalChromiumExecutablePath = async () => {
+  const envCandidates = [
+    process.env.MD2REDNOTE_CHROMIUM_PATH,
+    process.env.CHROME_PATH,
+    process.env.CHROMIUM_PATH,
+  ].filter(Boolean);
+
+  const platformCandidates = process.platform === 'darwin'
+    ? [
+        '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+        '/Applications/Chromium.app/Contents/MacOS/Chromium',
+        '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
+      ]
+    : process.platform === 'linux'
+      ? [
+          '/usr/bin/google-chrome',
+          '/usr/bin/google-chrome-stable',
+          '/usr/bin/chromium',
+          '/usr/bin/chromium-browser',
+          '/snap/bin/chromium',
+        ]
+      : process.platform === 'win32'
+        ? [
+            'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+            'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+            'C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe',
+            'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
+          ]
+        : [];
+
+  for (const candidate of [...envCandidates, ...platformCandidates]) {
+    try {
+      await access(candidate);
+      return candidate;
+    } catch {
+      // try next candidate
+    }
+  }
+
+  return null;
+};
+
 const launchChromium = async ({ runtime } = {}) => {
   const isServerless = runtime === 'serverless'
     || Boolean(process.env.VERCEL)
@@ -498,7 +782,17 @@ const launchChromium = async ({ runtime } = {}) => {
     || Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME);
 
   if (!isServerless) {
-    return playwrightChromium.launch({ headless: true });
+    try {
+      return await playwrightChromium.launch({ headless: true });
+    } catch (error) {
+      const fallbackExecutablePath = await resolveLocalChromiumExecutablePath();
+      if (!fallbackExecutablePath) throw error;
+
+      return playwrightChromium.launch({
+        headless: true,
+        executablePath: fallbackExecutablePath,
+      });
+    }
   }
 
   const chromiumLambda = await import('@sparticuz/chromium');

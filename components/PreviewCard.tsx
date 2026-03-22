@@ -4,10 +4,15 @@ import type { Components } from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
 import rehypeRaw from 'rehype-raw';
 import remarkGfm from 'remark-gfm';
+import { MARKDOWN_TABLE_CLASS_NAMES } from '../markdownTableClasses.js';
 import { TemplateProps } from '../types';
 
 const remarkPlugins = [remarkGfm];
 const rehypePlugins = [rehypeRaw, rehypeHighlight];
+
+const mergeClassName = (current: string | undefined, next: string) => (
+  [current, next].filter(Boolean).join(' ')
+);
 
 const PreviewCard = memo(forwardRef<HTMLDivElement, TemplateProps>(function PreviewCard({ data }, ref) {
   const { enTitle, title, metadata, body, images } = data;
@@ -57,6 +62,36 @@ const PreviewCard = memo(forwardRef<HTMLDivElement, TemplateProps>(function Prev
         </ol>
       );
     },
+    table: ({ className, children, ...props }) => (
+      <table {...props} className={mergeClassName(className, MARKDOWN_TABLE_CLASS_NAMES.table)}>
+        {children}
+      </table>
+    ),
+    thead: ({ className, children, ...props }) => (
+      <thead {...props} className={mergeClassName(className, MARKDOWN_TABLE_CLASS_NAMES.thead)}>
+        {children}
+      </thead>
+    ),
+    tbody: ({ className, children, ...props }) => (
+      <tbody {...props} className={mergeClassName(className, MARKDOWN_TABLE_CLASS_NAMES.tbody)}>
+        {children}
+      </tbody>
+    ),
+    tr: ({ className, children, ...props }) => (
+      <tr {...props} className={mergeClassName(className, MARKDOWN_TABLE_CLASS_NAMES.tr)}>
+        {children}
+      </tr>
+    ),
+    th: ({ className, children, ...props }) => (
+      <th {...props} className={mergeClassName(className, MARKDOWN_TABLE_CLASS_NAMES.th)}>
+        {children}
+      </th>
+    ),
+    td: ({ className, children, ...props }) => (
+      <td {...props} className={mergeClassName(className, MARKDOWN_TABLE_CLASS_NAMES.td)}>
+        {children}
+      </td>
+    ),
   }), [images]);
 
   return (
